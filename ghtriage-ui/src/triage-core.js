@@ -1,0 +1,289 @@
+const yaml = require('js-yaml');
+
+/**
+ * Parses a GitHub PR or Issue URL into repo, kind ('pr' | 'issue'), and number.
+ * @param {string} link
+ * @param {'pr' | 'issue'} fallbackType
+ */
+function parseGithubLink(link, fallbackType = 'issue') {
+  if (!link || typeof link !== 'string') {
+    return { repo: '', kind: fallbackType, number: '', url: '' };
+  }
+  const trimmed = link.trim();
+  const match = trimmed.match(/github\.com\/([^/]+\/[^/]+)\/(pull|issues)\/(\d+)/i);
+  if (match) {
+    return {
+      repo: match[1],
+      kind: match[2].toLowerCase() === 'pull' ? 'pr' : 'issue',
+      number: match[3],
+      url: trimmed,
+    };
+  }
+  return {
+    repo: '',
+    kind: fallbackType,
+    number: '',
+    url: trimmed,
+  };
+}
+
+/**
+ * Normalizes shortDescription from string or array of strings into an array of lines.
+ * @param {string | string[] | undefined} desc
+ * @returns {string[]}
+ */
+function normalizeDescription(desc) {
+  if (!desc) return [];
+  if (Array.isArray(desc)) {
+    return desc.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof desc === 'string') {
+    return [desc.trim()].filter(Boolean);
+  }
+  return [String(desc)];
+}
+
+/**
+ * Normalizes full description (string or string[]) into a single string.
+ * @param {string | string[] | undefined} desc
+ * @returns {string}
+ */
+function normalizeFullDescription(desc) {
+  if (!desc) return '';
+  if (Array.isArray(desc)) {
+    return desc.map((item) => String(item).trim()).filter(Boolean).join('\n\n');
+  }
+  if (typeof desc === 'string') {
+    return desc.trim();
+  }
+  return String(desc).trim();
+}
+
+/**
+ * Splits a full description string at `wordLimit` words (default 200) while preserving
+ * internal whitespace and line breaks.
+ * @param {string} text
+ * @param {number} wordLimit
+ */
+function splitWordsPreview(text, wordLimit = 200) {
+  const fullText = String(text || '').trim();
+  if (!fullText) {
+    return {
+      previewText: '',
+      remainingText: '',
+      fullText: '',
+      isTruncated: false,
+      totalWords: 0,
+      hiddenWords: 0,
+    };
+  }
+
+  const wordMatches = Array.from(fullText.matchAll(/\S+/g));
+  const totalWords = wordMatches.length;
+
+  if (totalWords <= wordLimit) {
+    return {
+      previewText: fullText,
+      remainingText: '',
+      fullText,
+      isTruncated: false,
+      totalWords,
+      hiddenWords: 0,
+    };
+  }
+
+  const boundaryMatch = wordMatches[wordLimit - 1];
+  const cutIndex = boundaryMatch.index + boundaryMatch[0].length;
+  return {
+    previewText: fullText.slice(0, cutIndex),
+    remainingText: fullText.slice(cutIndex),
+    fullText,
+    isTruncated: true,
+    totalWords,
+    hiddenWords: totalWords - wordLimit,
+  };
+}
+
+/**
+ * Parses raw YAML text into a normalized list of triage items.
+ * @param {string} yamlText
+ */
+function parseTriageYaml(yamlText) {
+  const doc = yaml.load(yamlText) || {};
+  if (typeof doc !== 'object') {
+    throw new Error('YAML root must be a mapping containing `pr` and/or `issue` lists.');
+  }
+
+  const items = [];
+  let nextId = 1;
+
+  const ingestGroup = (rawList, groupType) => {
+    if (!Array.isArray(rawList)) return;
+    for (const entry of rawList) {
+      if (!entry || typeof entry !== 'object') continue;
+      const parsedLink = parseGithubLink(entry.link, groupType);
+      const currentLabels = Array.isArray(entry.currentLabels)
+        ? entry.currentLabels.map((l) => String(l).trim()).filter(Boolean)
+        : [];
+
+      const proposedLabels = Array.isArray(entry.labels)
+        ? entry.labels
+            .filter((l) => l && typeof l === 'object' && l.name)
+            .map((l, idx) => {
+              const rawAction = String(l.action || 'ADD').trim().toUpperCase();
+              return {
+                id: `lbl-${nextId}-${idx + 1}`,
+                name: String(l.name).trim(),
+                action: rawAction === 'REMOVE' ? 'REMOVE' : 'ADD',
+                reason: l.reason ? String(l.reason).trim() : '',
+                enabled: true,
+              };
+            })
+        : [];
+
+      items.push({
+        id: `item-${nextId++}`,
+        type: parsedLink.kind || groupType,
+        link: parsedLink.url,
+        repo: parsedLink.repo,
+        number: parsedLink.number,
+        shortDescription: normalizeDescription(entry.shortDescription),
+        description: normalizeFullDescription(entry.description),
+        currentLabels,
+        labels: proposedLabels,
+        included: true,
+      });
+    }
+  };
+
+  ingestGroup(doc.pr, 'pr');
+  ingestGroup(doc.issue, 'issue');
+
+  return items;
+}
+
+/**
+ * Escapes a string for safe double-quoted shell usage.
+ * @param {string} str
+ */
+function shellQuote(str) {
+  return `"${String(str).replace(/(["\\$`])/g, '\\$1')}"`;
+}
+
+/**
+ * Generates the `gh` CLI shell script for all enabled items and active label changes.
+ * @param {Array} items
+ * @returns {string}
+ */
+function generateGhScript(items) {
+  const lines = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    '# Generated by ghtriage-ui',
+  ];
+
+  let commandCount = 0;
+
+  for (const item of items) {
+    if (!item.included) continue;
+    const activeLabels = (item.labels || []).filter(
+      (l) => l.enabled && l.name && l.name.trim().length > 0
+    );
+    if (activeLabels.length === 0) continue;
+
+    const addLabels = [];
+    const removeLabels = [];
+
+    for (const lbl of activeLabels) {
+      const cleanName = lbl.name.trim();
+      if (lbl.action === 'REMOVE') {
+        if (!removeLabels.includes(cleanName)) removeLabels.push(cleanName);
+      } else {
+        if (!addLabels.includes(cleanName)) addLabels.push(cleanName);
+      }
+    }
+
+    if (addLabels.length === 0 && removeLabels.length === 0) continue;
+
+    const subcommand = item.type === 'pr' ? 'pr' : 'issue';
+    const summaryLine =
+      item.shortDescription && item.shortDescription.length > 0
+        ? item.shortDescription[0]
+        : item.link;
+    const displayRef =
+      item.repo && item.number
+        ? `${item.type.toUpperCase()} ${item.repo}#${item.number}`
+        : `${item.type.toUpperCase()} ${item.link}`;
+
+    lines.push('');
+    lines.push(`# ${displayRef}: ${summaryLine}`);
+
+    const cmdParts = ['gh', subcommand, 'edit'];
+    if (item.repo && item.number) {
+      cmdParts.push(item.number, '-R', item.repo);
+    } else {
+      cmdParts.push(shellQuote(item.link));
+    }
+
+    if (addLabels.length > 0) {
+      cmdParts.push('--add-label', shellQuote(addLabels.join(',')));
+    }
+    if (removeLabels.length > 0) {
+      cmdParts.push('--remove-label', shellQuote(removeLabels.join(',')));
+    }
+
+    lines.push(cmdParts.join(' '));
+    commandCount++;
+  }
+
+  if (commandCount === 0) {
+    lines.push('');
+    lines.push('# No active label changes selected.');
+  }
+
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * Serializes current items back to the YAML format defined in README.md.
+ * @param {Array} items
+ * @returns {string}
+ */
+function serializeTriageYaml(items) {
+  const output = { pr: [], issue: [] };
+  for (const item of items) {
+    const group = item.type === 'pr' ? output.pr : output.issue;
+    const serializedItem = {
+      link: item.link,
+      shortDescription: item.shortDescription,
+    };
+    if (item.description && item.description.trim()) {
+      serializedItem.description = item.description.trim();
+    }
+    serializedItem.currentLabels = item.currentLabels;
+    serializedItem.labels = item.labels
+      .filter((l) => l.enabled)
+      .map((l) => ({
+        name: l.name,
+        action: l.action,
+        reason: l.reason || '',
+      }));
+    group.push(serializedItem);
+  }
+  if (output.pr.length === 0) delete output.pr;
+  if (output.issue.length === 0) delete output.issue;
+  return yaml.dump(output, { lineWidth: 100, noRefs: true });
+}
+
+module.exports = {
+  parseGithubLink,
+  normalizeDescription,
+  normalizeFullDescription,
+  splitWordsPreview,
+  parseTriageYaml,
+  generateGhScript,
+  serializeTriageYaml,
+  shellQuote,
+};

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="GitHub Issue and Pull Request label triage interface with interactive editing and gh CLI script generation." />
+  <title>GitHub Issue &amp; PR Triage UI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app-shell" class="app-shell">
+    <!-- Top Header Bar -->
+    <header class="top-header">
+      <div class="brand-group">
+        <h1 class="app-title">GitHub Triage Workbench</h1>
+        <span id="active-file-badge" class="source-badge" title="Active YAML source">No file loaded</span>
+      </div>
+
+      <div class="header-actions">
+        <button id="btn-open-yaml" class="btn btn-secondary" type="button" title="Open a .yaml or .yml file from disk">
+          Open YAML…
+        </button>
+        <button id="btn-paste-yaml" class="btn btn-secondary" type="button" title="Paste or edit raw YAML text">
+          Paste / Edit YAML
+        </button>
+        <button id="btn-export-yaml" class="btn btn-ghost" type="button" title="Save updated YAML back to disk">
+          Export YAML
+        </button>
+        <div class="divider-vertical"></div>
+        <button id="btn-copy-script" class="btn btn-secondary" type="button" title="Copy generated gh CLI script to clipboard">
+          Copy `gh` Script
+        </button>
+        <button id="btn-save-script" class="btn btn-primary" type="button" title="Save executable gh CLI script to a file">
+          Save Script (.sh)
+        </button>
+      </div>
+    </header>
+
+    <!-- Toolbar: Filter Tabs, Search, Bulk Controls -->
+    <section class="toolbar" aria-label="Triage filters and bulk actions">
+      <div class="filter-tabs" role="tablist">
+        <button id="tab-all" class="tab-btn active" data-filter="all" role="tab" aria-selected="true" type="button">
+          All <span id="count-all" class="tab-count">0</span>
+        </button>
+        <button id="tab-pr" class="tab-btn" data-filter="pr" role="tab" aria-selected="false" type="button">
+          Pull Requests <span id="count-pr" class="tab-count">0</span>
+        </button>
+        <button id="tab-issue" class="tab-btn" data-filter="issue" role="tab" aria-selected="false" type="button">
+          Issues <span id="count-issue" class="tab-count">0</span>
+        </button>
+      </div>
+
+      <div class="toolbar-right">
+        <div class="search-box">
+          <input
+            id="search-input"
+            type="search"
+            placeholder="Filter by #number, description, label, or reason…"
+            aria-label="Filter triage items"
+          />
+        </div>
+        <button id="btn-enable-all" class="btn btn-xs btn-ghost" type="button">Enable All Changes</button>
+        <button id="btn-disable-all" class="btn btn-xs btn-ghost" type="button">Disable All Changes</button>
+      </div>
+    </section>
+
+    <!-- Main Workspace Split: Table + Live Script Output -->
+    <main class="workspace-main">
+      <div id="table-container" class="table-container">
+        <table id="triage-table" class="triage-table">
+          <thead>
+            <tr>
+              <th class="col-check">
+                <input id="checkbox-select-all" type="checkbox" checked title="Include or exclude all visible rows" aria-label="Select all rows" />
+              </th>
+              <th class="col-item">Item</th>
+              <th class="col-desc">Short Description</th>
+              <th class="col-full-desc">Description</th>
+              <th class="col-current">Current Labels <span class="th-hint">(click to stage removal)</span></th>
+              <th class="col-proposed">Proposed Label Changes <span class="th-hint">(click action to flip, toggle, or add)</span></th>
+            </tr>
+          </thead>
+          <tbody id="triage-tbody">
+            <!-- Populated dynamically by renderer.js -->
+          </tbody>
+        </table>
+
+        <div id="empty-state" class="empty-state hidden">
+          <p class="empty-title">No triage items match the current view.</p>
+          <p class="empty-subtitle">Open or drop a YAML file anywhere on this window, or click <strong>Paste / Edit YAML</strong> to get started.</p>
+        </div>
+      </div>
+
+      <!-- Bottom Script Preview Panel -->
+      <section class="script-panel" aria-label="Generated gh CLI script">
+        <div class="script-panel-header">
+          <div class="script-panel-title-group">
+            <h2 class="script-panel-title">Generated <code>gh</code> CLI Commands</h2>
+            <span id="script-summary-meta" class="script-meta">0 commands ready</span>
+          </div>
+          <div class="script-panel-actions">
+            <button id="btn-toggle-script" class="btn btn-xs btn-ghost" type="button">
+              Collapse Preview
+            </button>
+          </div>
+        </div>
+        <pre id="script-preview" class="script-preview" tabindex="0"><code># Loading...</code></pre>
+      </section>
+    </main>
+
+    <!-- Paste / Edit YAML Modal -->
+    <div id="yaml-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="yaml-modal-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="yaml-modal-title" class="modal-title">Paste or Edit Triage YAML</h2>
+          <button id="btn-close-modal" class="btn-icon" type="button" aria-label="Close modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-helper">
+            Provide YAML with top-level <code>pr:</code> and/or <code>issue:</code> lists matching the repository triage format.
+          </p>
+          <textarea id="yaml-textarea" class="yaml-textarea" spellcheck="false" placeholder="pr:&#10;  - link: https://github.com/org/repo/pull/123&#10;    shortDescription: [...]&#10;    currentLabels: [...]&#10;    labels:&#10;      - name: &quot;kind/bug&quot;&#10;        action: ADD&#10;        reason: &quot;...&quot;"></textarea>
+          <div id="yaml-modal-error" class="modal-error hidden"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-cancel-yaml" class="btn btn-ghost" type="button">Cancel</button>
+          <button id="btn-apply-yaml" class="btn btn-primary" type="button">Load YAML</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Datalist for known labels autocomplete -->
+    <datalist id="known-labels-datalist"></datalist>
+
+    <!-- Toast Notification -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

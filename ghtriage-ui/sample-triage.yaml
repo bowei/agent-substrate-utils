@@ -1,0 +1,105 @@
+pr:
+  - link: https://github.com/agent-substrate/substrate/pull/3867
+    shortDescription:
+      - "Fix race condition in worker pool shutdown sequence"
+      - "Ensures all inflight tasks complete or cancel cleanly before channel close"
+    description: |
+      ## Summary
+      When a worker node receives `SIGTERM` under heavy request load, `WorkerPool.Close()` previously closed the internal `resultsCh` channel immediately after cancelling the root context, without waiting for active worker goroutines to drain their current iteration. Any goroutine attempting to write its terminal status to `resultsCh` after `close(resultsCh)` triggered an unrecoverable `send on closed channel` runtime panic.
+
+      ## Root Cause Analysis
+      In `pkg/runtime/pool.go`, the shutdown sequence executed the following steps:
+      1. Set the atomic `draining` flag to `1`.
+      2. Cancel `pool.ctx` to signal active workers to abort long-running operations.
+      3. Immediately call `close(pool.resultsCh)` and return control to the caller.
+
+      Because step 3 did not synchronize on `pool.wg.Wait()`, any worker goroutine that was mid-execution between checking `pool.ctx.Done()` and writing its final `TaskResult` struct into `pool.resultsCh` would race directly with the channel close operation. Under high concurrency (64+ workers), this race reproduced on roughly 18% of rolling restarts in staging clusters.
+
+      ## Changes Made
+      - Moved `close(pool.resultsCh)` inside a dedicated coordinator goroutine that blocks on `pool.wg.Wait()` before closing the channel.
+      - Added a two-phase drain timeout (`GracefulDrainTimeout`, defaulting to 15 seconds) so stuck handlers are logged with stack traces before process exit.
+      - Added a deterministic stress test (`TestWorkerPoolConcurrentShutdown`) running 200 parallel workers under `-race` to verify zero panics and zero leaked goroutines across 500 rapid start/stop cycles.
+    currentLabels:
+      - "area/runtime"
+      - "needs-triage"
+    labels:
+      - name: "kind/bug"
+        action: ADD
+        reason: "Fixes a deterministic concurrency crash during graceful termination"
+      - name: "priority/p1"
+        action: ADD
+        reason: "Blocks clean shutdown in production worker nodes"
+      - name: "needs-triage"
+        action: REMOVE
+        reason: "PR has been reviewed and categorized"
+  - link: https://github.com/agent-substrate/substrate/pull/3871
+    shortDescription:
+      - "Add OpenTelemetry trace propagation across gRPC boundaries"
+    description: |
+      Adds W3C TraceContext (`traceparent` and `tracestate`) client and server interceptors to all internal gRPC connections between the gateway, scheduler, and execution sandbox pods.
+
+      This allows operators to follow a single request trace end-to-end across service boundaries in Jaeger and Cloud Trace when `telemetry.tracing.enabled=true` is configured.
+    currentLabels:
+      - "area/observability"
+    labels:
+      - name: "kind/feature"
+        action: ADD
+        reason: "Introduces new distributed tracing headers and span context propagation"
+      - name: "release-note-needed"
+        action: ADD
+        reason: "User-facing observability configuration additions"
+
+issue:
+  - link: https://github.com/agent-substrate/substrate/issues/3876
+    shortDescription:
+      - "Memory spike when parsing large YAML manifests (>50MB)"
+    description: |
+      ### What happened?
+      When loading multi-document YAML manifests larger than 50MB via `substrate apply -f bundle.yaml`, RSS memory usage spikes from ~120MB to over 3.8GB within a few seconds, causing the CLI or controller pod to be OOMKilled on nodes with a 2Gi memory limit.
+
+      ### What did you expect to happen?
+      Manifest ingestion should stream documents incrementally using a streaming YAML decoder rather than buffering the entire AST and materializing multiple deep-copied intermediate maps in memory simultaneously.Peak memory should remain proportional to the size of the largest single document in the stream rather than the sum of all documents.
+
+      ### How can we reproduce it?
+      1. Generate a synthetic multi-document manifest containing 10,000 specification objects (`python3 hack/gen-large-manifest.py --count 10000 > /tmp/large.yaml`, ~62MB on disk).
+      2. Run `substrate validate --manifest /tmp/large.yaml` while monitoring resident memory with `/usr/bin/time -v`.
+      3. Observe RSS climbing past 3.5GB during the schema normalization pass in `pkg/manifest/loader.go:184` where `deepCloneMap` is invoked recursively on every node before validation rules are evaluated.
+
+      ### Environment
+      - Substrate version: `v0.19.2`
+      - OS / Arch: `linux/amd64` (Debian 12, Kernel 6.6)
+      - Go runtime: `go1.23.4`
+    currentLabels:
+      - "needs-triage"
+      - "kind/Cleanup"
+    labels:
+      - name: "area/parser"
+        action: ADD
+        reason: "Issue occurs in the manifest loader pipeline"
+      - name: "kind/bug"
+        action: ADD
+        reason: "OOM crash reported with reproduction steps"
+      - name: "kind/Cleanup"
+        action: REMOVE
+        reason: "Misclassified as cleanup; this is an active memory regression"
+      - name: "needs-triage"
+        action: REMOVE
+        reason: "Initial triage completed"
+  - link: https://github.com/agent-substrate/substrate/issues/3880
+    shortDescription:
+      - "Document custom plugin lifecycle hooks in developer guide"
+    description: |
+      The `PluginHook` interface in `pkg/plugin/hooks.go` added `OnPreExecute` and `OnPostTeardown` callbacks in v0.18, but `docs/developer-guide/plugins.md` still only lists `OnInit` and `OnShutdown`. We should document the execution order, timeout behavior, and error handling semantics for all four lifecycle hooks.
+    currentLabels:
+      - "area/docs"
+      - "needs-triage"
+    labels:
+      - name: "kind/documentation"
+        action: ADD
+        reason: "Request for documentation expansion"
+      - name: "good first issue"
+        action: ADD
+        reason: "Self-contained documentation update with clear scope"
+      - name: "needs-triage"
+        action: REMOVE
+        reason: "Triaged into docs backlog"

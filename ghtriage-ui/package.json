@@ -1,0 +1,17 @@
+{
+  "name": "ghtriage-ui",
+  "version": "1.0.0",
+  "description": "Electron UI for GitHub issue and PR label triage",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "sample": "electron . sample-triage.yaml",
+    "test": "node test/verify.js"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}
